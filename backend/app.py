@@ -6,6 +6,8 @@ from datetime import datetime
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from sqlalchemy import Column, Integer, String, Float, Enum, ForeignKey, PrimaryKeyConstraint, Date, TIMESTAMP, Text
 from flask import abort
+from werkzeug.exceptions import NotFound
+from sqlalchemy.orm import relationship
 
 
 ###########################################
@@ -22,7 +24,6 @@ db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 login_manager = LoginManager(app)
 
-
 class User(db.Model, UserMixin):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(50), unique=True, nullable=False)
@@ -30,12 +31,24 @@ class User(db.Model, UserMixin):
     full_name = Column(String(100), nullable=False)
     role = Column(Enum('teacher', 'student', 'admin'), nullable=False)
 
+    # Define relationships
+    teacher_classes = relationship('TeacherClass', back_populates='teacher')
+    student_classes = relationship('StudentClass', back_populates='student')
+    attendances = relationship('Attendance', back_populates='student')
+    grades = relationship('Grade', back_populates='student')
+
     def __repr__(self):
         return f"<User(id={self.id}, username={self.username}, role={self.role})>"
 
 class Class(db.Model):
     id = Column(Integer, primary_key=True, autoincrement=True)
     class_code = Column(String(10), unique=True, nullable=False)
+
+    # Define relationships
+    assignments = relationship('Assignment', back_populates='class_obj')
+    teacher_classes = relationship('TeacherClass', back_populates='class_obj')
+    student_classes = relationship('StudentClass', back_populates='class_obj')
+    attendances = relationship('Attendance', back_populates='class_obj')
 
     def __repr__(self):
         return f"<Class(id={self.id}, class_code={self.class_code})>"
@@ -47,6 +60,10 @@ class Assignment(db.Model):
     due_date = Column(TIMESTAMP)
     class_id = Column(Integer, ForeignKey('class.id'))
 
+    # Define relationships
+    class_obj = relationship('Class', back_populates='assignments')
+    grades = relationship('Grade', back_populates='assignment')
+
     def __repr__(self):
         return f"<Assignment(id={self.id}, title={self.title}, class_id={self.class_id})>"
 
@@ -57,6 +74,10 @@ class Attendance(db.Model):
     student_id = Column(Integer, ForeignKey('user.id'))
     status = Column(Enum('present', 'absent'), nullable=False)
 
+    # Define relationships
+    class_obj = relationship('Class', back_populates='attendances')
+    student = relationship('User', back_populates='attendances')
+
     def __repr__(self):
         return f"<Attendance(id={self.id}, class_id={self.class_id}, student_id={self.student_id}, status={self.status})>"
 
@@ -66,10 +87,12 @@ class Grade(db.Model):
     student_id = Column(Integer, ForeignKey('user.id'))
     score = Column(Float, nullable=False)
 
+    # Define relationships
+    assignment = relationship('Assignment', back_populates='grades')
+    student = relationship('User', back_populates='grades')
+
     def __repr__(self):
         return f"<Grade(id={self.id}, assignment_id={self.assignment_id}, student_id={self.student_id}, score={self.score})>"
-
-
 
 #login and authentication routed
     
@@ -213,7 +236,7 @@ def get_users():
 def get_classes():
     if current_user.role == 'admin' or current_user.role == 'teacher':
         classes = Class.query.all()
-        return jsonify({'classes': [c.__repr__() for c in classes]})
+        return jsonify({'classes': [c.__repr__() for c in classes]}), 200
     else:
         abort(403, {"error": "Permission denied. Only admins and teachers can view classes."})
 
@@ -285,6 +308,87 @@ def delete_class(class_id):
 ######################################################
         
 
+##########################################################
+#              API CALLS FOR ASSIGNMENTS                #
+##########################################################
+
+@app.route('/api/assignments', methods=['POST'])
+@login_required
+def create_assignment():
+    if current_user.role != 'teacher':
+        abort(403, {"error": "Permission denied. Only teachers can create assignments."})
+
+    data = request.get_json()
+    title = data.get('title')
+    description = data.get('description')
+    due_date = datetime.strptime(data.get('due_date'), '%Y-%m-%dT%H:%M:%S.%fZ')
+
+    new_assignment = Assignment(title=title, description=description, due_date=due_date, class_id=current_user.assigned_classes[0].id)
+
+    db.session.add(new_assignment)
+    db.session.commit()
+
+    return jsonify({"message": "Assignment created successfully"}), 201
+
+@app.route('/api/assignments', methods=['GET'])
+@login_required
+def get_assignments():
+    if current_user.role == 'admin':
+        assignments = Assignment.query.all()
+    else:
+        assignments = Assignment.query.filter_by(class_id=current_user.assigned_classes[0].id).all()
+
+    assignments_data = [{"id": assignment.id, "title": assignment.title, "description": assignment.description, "due_date": assignment.due_date} for assignment in assignments]
+
+    return jsonify(assignments_data)
+
+@app.route('/api/assignments/<int:assignment_id>', methods=['GET'])
+@login_required
+def get_assignment(assignment_id):
+    assignment = Assignment.query.get(assignment_id)
+
+    if not assignment or (current_user.role != 'admin' and assignment.class_id != current_user.assigned_classes[0].id):
+        raise NotFound("Assignment not found")
+
+    assignment_data = {"id": assignment.id, "title": assignment.title, "description": assignment.description, "due_date": assignment.due_date}
+
+    return jsonify(assignment_data)
+
+@app.route('/api/assignments/<int:assignment_id>', methods=['PUT'])
+@login_required
+def update_assignment(assignment_id):
+    if current_user.role != 'teacher':
+        abort(403, {"error": "Permission denied. Only teachers can update assignments."})
+
+    assignment = Assignment.query.get(assignment_id)
+
+    if not assignment or assignment.class_id != current_user.assigned_classes[0].id:
+        raise NotFound("Assignment not found")
+
+    data = request.get_json()
+    assignment.title = data.get('title', assignment.title)
+    assignment.description = data.get('description', assignment.description)
+    assignment.due_date = datetime.strptime(data.get('due_date'), '%Y-%m-%dT%H:%M:%S.%fZ') if data.get('due_date') else assignment.due_date
+
+    db.session.commit()
+
+    return jsonify({"message": "Assignment updated successfully"})
+
+@app.route('/api/assignments/<int:assignment_id>', methods=['DELETE'])
+@login_required
+def delete_assignment(assignment_id):
+    if current_user.role != 'teacher':
+        abort(403, {"error": "Permission denied. Only teachers can delete assignments."})
+
+    assignment = Assignment.query.get(assignment_id)
+
+    if not assignment or assignment.class_id != current_user.assigned_classes[0].id:
+        raise NotFound("Assignment not found")
+
+    db.session.delete(assignment)
+    db.session.commit()
+
+    return jsonify({"message": "Assignment deleted successfully"})
 
 
 
