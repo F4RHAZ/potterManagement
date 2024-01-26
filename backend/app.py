@@ -54,28 +54,28 @@ class Class(db.Model):
         return f"<Class(id={self.id}, class_code={self.class_code})>"
 
 class TeacherClass(db.Model):
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    teacher_id = Column(Integer, ForeignKey('user.id'))
-    class_id = Column(Integer, ForeignKey('class.id'))
+    teacher_id = Column(Integer, ForeignKey('user.id'), primary_key=True)
+    class_id = Column(Integer, ForeignKey('class.id'), primary_key=True)
 
     # Define relationships
     teacher = relationship('User', back_populates='teacher_classes')
     class_obj = relationship('Class', back_populates='teacher_classes')
 
     def __repr__(self):
-        return f"<TeacherClass(id={self.id}, teacher_id={self.teacher_id}, class_id={self.class_id})>"
+        return f"<TeacherClass(teacher_id={self.teacher_id}, class_id={self.class_id})>"
+
 
 class StudentClass(db.Model):
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    student_id = Column(Integer, ForeignKey('user.id'))
-    class_id = Column(Integer, ForeignKey('class.id'))
+    student_id = Column(Integer, ForeignKey('user.id'), primary_key=True)
+    class_id = Column(Integer, ForeignKey('class.id'), primary_key=True)
 
     # Define relationships
     student = relationship('User', back_populates='student_classes')
     class_obj = relationship('Class', back_populates='student_classes')
 
     def __repr__(self):
-        return f"<StudentClass(id={self.id}, student_id={self.student_id}, class_id={self.class_id})>"
+        return f"<StudentClass(student_id={self.student_id}, class_id={self.class_id})>"
+
 
 class Assignment(db.Model):
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -154,12 +154,13 @@ def logout():
     return jsonify({"message": "Logout successful"}), 200
 
 
+
 @app.route('/api/profile')
 @login_required
 def profile():
+    # Print assigned classes for debugging
+    print("Assigned Classes:", current_user.teacher_classes)
     return jsonify({"username": current_user.username, "role": current_user.role})
-
-
 ##########################################################
 #              API CALLS CRUD                            #
 #########################################################
@@ -419,6 +420,222 @@ def delete_assignment(assignment_id):
         return jsonify({"message": "Assignment deleted successfully"})
     else:
         abort(403, {"error": "Permission denied. Only admins and teachers can delete assignments."})
+
+
+###############################################################################################
+#           CRUD FOR ATTENDANCE
+################################################################################
+
+# GET all attendance records
+@app.route('/api/attendance', methods=['GET'])
+@login_required
+def get_attendance():
+    if current_user.role == 'admin' or current_user.role == 'teacher':
+        attendance_records = Attendance.query.all()
+        return jsonify({'attendance': [a.__repr__() for a in attendance_records]})
+    else:
+        abort(403, {"error": "Permission denied. Only admins and teachers can view attendance records."})
+
+# GET specific attendance record
+@app.route('/api/attendance/<int:attendance_id>', methods=['GET'])
+@login_required
+def get_specific_attendance(attendance_id):
+    attendance_record = Attendance.query.get(attendance_id)
+    if attendance_record:
+        if current_user.role == 'admin' or current_user.role == 'teacher':
+            return jsonify(attendance_record.__repr__())
+        else:
+            abort(403, {"error": "Permission denied. Only admins and teachers can view attendance records."})
+    else:
+        abort(404, {"error": "Attendance record not found."})
+
+# POST attendance record
+@app.route('/api/attendance', methods=['POST'])
+@login_required
+def create_attendance():
+    if current_user.role == 'teacher':
+        data = request.get_json()
+        class_id = data.get('class_id')
+        student_id = data.get('student_id')
+        date = data.get('date')
+        status = data.get('status')
+        print(current_user.teacher_classes)
+
+        # Check if the teacher is assigned to the specified class
+        assigned_class = TeacherClass.query.filter_by(teacher_id=current_user.id, class_id=class_id).first()
+        if not assigned_class:
+            abort(403, {"error": "Permission denied. You are not assigned to this class."})
+
+        new_attendance = Attendance(class_id=class_id, student_id=student_id, date=date, status=status)
+        db.session.add(new_attendance)
+        db.session.commit()
+
+        return jsonify({"message": "Attendance record created successfully"}), 201
+    else:
+        abort(403, {"error": "Permission denied. Only teachers can create attendance records."})
+
+# UPDATE attendance record
+@app.route('/api/attendance/<int:attendance_id>', methods=['PUT'])
+@login_required
+def update_attendance(attendance_id):
+    if current_user.role == 'teacher':
+        attendance_record = Attendance.query.get(attendance_id)
+        if attendance_record:
+            data = request.get_json()
+            attendance_record.status = data.get('status')
+            db.session.commit()
+
+            return jsonify({"message": "Attendance record updated successfully"})
+        else:
+            abort(404, {"error": "Attendance record not found."})
+    else:
+        abort(403, {"error": "Permission denied. Only teachers can update attendance records."})
+
+# DELETE attendance record
+@app.route('/api/attendance/<int:attendance_id>', methods=['DELETE'])
+@login_required
+def delete_attendance(attendance_id):
+    if current_user.role == 'teacher':
+        attendance_record = Attendance.query.get(attendance_id)
+        if attendance_record:
+            db.session.delete(attendance_record)
+            db.session.commit()
+
+            return jsonify({"message": "Attendance record deleted successfully"})
+        else:
+            abort(404, {"error": "Attendance record not found."})
+    else:
+        abort(403, {"error": "Permission denied. Only teachers can delete attendance records."})
+
+
+
+
+
+
+###########################################
+        # Teahc and class assignments
+#  STUDNET ASSIGNMENT TO CLASSES        
+ ##################################
+
+@app.route('/api/get_classes_and_teachers', methods=['GET'])
+@login_required
+def get_classes_and_teachers():
+    if current_user.role != 'admin':
+        abort(403, {"error": "Permission denied. Only admins can view classes and teachers."})
+
+    classes_and_teachers = []
+
+    # Retrieve all classes
+    classes = Class.query.all()
+    for class_obj in classes:
+        class_info = {
+            'class_id': class_obj.id,
+            'class_code': class_obj.class_code,
+            'teachers': []
+        }
+
+        # Retrieve teachers assigned to the class
+        teacher_assignments = TeacherClass.query.filter_by(class_id=class_obj.id).all()
+        for assignment in teacher_assignments:
+            teacher_info = {
+                'teacher_id': assignment.teacher.id,
+                'teacher_username': assignment.teacher.username,
+                'teacher_full_name': assignment.teacher.full_name
+            }
+            class_info['teachers'].append(teacher_info)
+
+        classes_and_teachers.append(class_info)
+
+    return jsonify({"classes_and_teachers": classes_and_teachers})
+
+
+
+@app.route('/api/assign_teacher_to_class', methods=['POST'])
+@login_required
+def assign_teacher_to_class():
+    if current_user.role != 'admin':
+        abort(403, {"error": "Permission denied. Only admins can assign teachers to classes."})
+
+    data = request.get_json()
+    teacher_id = data.get('teacher_id')
+    class_id = data.get('class_id')
+
+    # Check if both teacher and class exist
+    teacher = User.query.get(teacher_id)
+    class_obj = Class.query.get(class_id)
+
+    if not teacher or not class_obj:
+        abort(404, {"error": "Teacher or class not found."})
+
+    # Check if the teacher is already assigned to the class
+    if TeacherClass.query.filter_by(teacher_id=teacher_id, class_id=class_id).first():
+        return jsonify({"message": "Teacher already assigned to the class."})
+
+    # Assign the teacher to the class
+    new_assignment = TeacherClass(teacher=teacher, class_obj=class_obj)
+    db.session.add(new_assignment)
+    db.session.commit()
+
+    return jsonify({"message": "Teacher assigned to the class successfully."})
+
+
+@app.route('/api/assign_student_to_class', methods=['POST'])
+@login_required
+def assign_student_to_class():
+    if current_user.role != 'admin':
+        abort(403, {"error": "Permission denied. Only admins can assign students to classes."})
+
+    data = request.get_json()
+    student_id = data.get('student_id')
+    class_id = data.get('class_id')
+
+    # Add logic to check if the student and class exist
+
+    # Create a new record in the StudentClass table
+    new_student_class = StudentClass(student_id=student_id, class_id=class_id)
+    db.session.add(new_student_class)
+    db.session.commit()
+    return jsonify({"message": "Student assigned to class successfully"}), 201
+
+
+@app.route('/api/get_students_and_classes', methods=['GET'])
+@login_required
+def get_students_and_classes():
+    if current_user.role != 'admin':
+        abort(403, {"error": "Permission denied. Only admins can access this information."})
+
+    # Query all students and their assigned classes
+    students = User.query.filter_by(role='student').all()
+
+    student_info = []
+    for student in students:
+        assigned_classes = []
+        student_classes = StudentClass.query.filter_by(student_id=student.id).all()
+        for student_class in student_classes:
+            class_info = {
+                "class_id": student_class.class_obj.id,
+                "class_code": student_class.class_obj.class_code
+            }
+            assigned_classes.append(class_info)
+
+        student_data = {
+            "id": student.id,
+            "full_name": student.full_name,
+            "role": student.role,
+            "username": student.username,
+            "assigned_classes": assigned_classes
+        }
+        student_info.append(student_data)
+
+    return jsonify({"students": student_info})
+
+
+
+##############################################################33
+
+
+
+
 
 
 @app.route('/api/hello')
