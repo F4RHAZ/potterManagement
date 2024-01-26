@@ -53,6 +53,30 @@ class Class(db.Model):
     def __repr__(self):
         return f"<Class(id={self.id}, class_code={self.class_code})>"
 
+class TeacherClass(db.Model):
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    teacher_id = Column(Integer, ForeignKey('user.id'))
+    class_id = Column(Integer, ForeignKey('class.id'))
+
+    # Define relationships
+    teacher = relationship('User', back_populates='teacher_classes')
+    class_obj = relationship('Class', back_populates='teacher_classes')
+
+    def __repr__(self):
+        return f"<TeacherClass(id={self.id}, teacher_id={self.teacher_id}, class_id={self.class_id})>"
+
+class StudentClass(db.Model):
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, ForeignKey('user.id'))
+    class_id = Column(Integer, ForeignKey('class.id'))
+
+    # Define relationships
+    student = relationship('User', back_populates='student_classes')
+    class_obj = relationship('Class', back_populates='student_classes')
+
+    def __repr__(self):
+        return f"<StudentClass(id={self.id}, student_id={self.student_id}, class_id={self.class_id})>"
+
 class Assignment(db.Model):
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String(100), nullable=False)
@@ -311,86 +335,90 @@ def delete_class(class_id):
 ##########################################################
 #              API CALLS FOR ASSIGNMENTS                #
 ##########################################################
-
+# CREATE Assignment
 @app.route('/api/assignments', methods=['POST'])
 @login_required
 def create_assignment():
-    if current_user.role != 'teacher':
-        abort(403, {"error": "Permission denied. Only teachers can create assignments."})
+    if current_user.role == 'admin' or current_user.role == 'teacher':
+        data = request.get_json()
+        title = data.get('title')
+        description = data.get('description')
+        due_date_str = data.get('due_date')
+        class_id = data.get('class_id')
 
-    data = request.get_json()
-    title = data.get('title')
-    description = data.get('description')
-    due_date = datetime.strptime(data.get('due_date'), '%Y-%m-%dT%H:%M:%S.%fZ')
+        # Convert the string to a datetime object
+        due_date = datetime.fromisoformat(due_date_str)
 
-    new_assignment = Assignment(title=title, description=description, due_date=due_date, class_id=current_user.assigned_classes[0].id)
 
-    db.session.add(new_assignment)
-    db.session.commit()
+        new_assignment = Assignment(title=title, description=description, due_date=due_date, class_id=class_id)
+        db.session.add(new_assignment)
+        db.session.commit()
 
-    return jsonify({"message": "Assignment created successfully"}), 201
+        return jsonify({"message": "Assignment created successfully"}), 201
+    else:
+        abort(403, {"error": "Permission denied. Only admins and teachers can create assignments."})
+
+
 
 @app.route('/api/assignments', methods=['GET'])
 @login_required
 def get_assignments():
-    if current_user.role == 'admin':
+    if current_user.role == 'admin' or current_user.role == 'teacher':
         assignments = Assignment.query.all()
+        assignment_list = [{'id': a.id, 'title': a.title, 'description': a.description, 'due_date': a.due_date, 'class_id': a.class_id} for a in assignments]
+        return jsonify({'assignments': assignment_list})
     else:
-        assignments = Assignment.query.filter_by(class_id=current_user.assigned_classes[0].id).all()
+        abort(403, {"error": "Permission denied. Only admins and teachers can view assignments."})
 
-    assignments_data = [{"id": assignment.id, "title": assignment.title, "description": assignment.description, "due_date": assignment.due_date} for assignment in assignments]
-
-    return jsonify(assignments_data)
-
+# READ Specific Assignment
 @app.route('/api/assignments/<int:assignment_id>', methods=['GET'])
 @login_required
 def get_assignment(assignment_id):
     assignment = Assignment.query.get(assignment_id)
+    if not assignment:
+        abort(404, {"error": "Assignment not found."})
 
-    if not assignment or (current_user.role != 'admin' and assignment.class_id != current_user.assigned_classes[0].id):
-        raise NotFound("Assignment not found")
+    if current_user.role == 'admin' or current_user.role == 'teacher':
+        return jsonify({'id': assignment.id, 'title': assignment.title, 'description': assignment.description, 'due_date': assignment.due_date, 'class_id': assignment.class_id})
+    else:
+        abort(403, {"error": "Permission denied. Only admins and teachers can view assignments."})
 
-    assignment_data = {"id": assignment.id, "title": assignment.title, "description": assignment.description, "due_date": assignment.due_date}
-
-    return jsonify(assignment_data)
-
+# UPDATE Assignment
 @app.route('/api/assignments/<int:assignment_id>', methods=['PUT'])
 @login_required
 def update_assignment(assignment_id):
-    if current_user.role != 'teacher':
-        abort(403, {"error": "Permission denied. Only teachers can update assignments."})
+    if current_user.role == 'admin' or current_user.role == 'teacher':
+        assignment = Assignment.query.get(assignment_id)
+        if not assignment:
+            abort(404, {"error": "Assignment not found."})
 
-    assignment = Assignment.query.get(assignment_id)
+        data = request.get_json()
+        assignment.title = data.get('title', assignment.title)
+        assignment.description = data.get('description', assignment.description)
+        assignment.due_date = data.get('due_date', assignment.due_date)
+        assignment.class_id = data.get('class_id', assignment.class_id)
 
-    if not assignment or assignment.class_id != current_user.assigned_classes[0].id:
-        raise NotFound("Assignment not found")
+        db.session.commit()
 
-    data = request.get_json()
-    assignment.title = data.get('title', assignment.title)
-    assignment.description = data.get('description', assignment.description)
-    assignment.due_date = datetime.strptime(data.get('due_date'), '%Y-%m-%dT%H:%M:%S.%fZ') if data.get('due_date') else assignment.due_date
+        return jsonify({"message": "Assignment updated successfully"})
+    else:
+        abort(403, {"error": "Permission denied. Only admins and teachers can update assignments."})
 
-    db.session.commit()
-
-    return jsonify({"message": "Assignment updated successfully"})
-
+# DELETE Assignment
 @app.route('/api/assignments/<int:assignment_id>', methods=['DELETE'])
 @login_required
 def delete_assignment(assignment_id):
-    if current_user.role != 'teacher':
-        abort(403, {"error": "Permission denied. Only teachers can delete assignments."})
+    if current_user.role == 'admin' or current_user.role == 'teacher':
+        assignment = Assignment.query.get(assignment_id)
+        if not assignment:
+            abort(404, {"error": "Assignment not found."})
 
-    assignment = Assignment.query.get(assignment_id)
+        db.session.delete(assignment)
+        db.session.commit()
 
-    if not assignment or assignment.class_id != current_user.assigned_classes[0].id:
-        raise NotFound("Assignment not found")
-
-    db.session.delete(assignment)
-    db.session.commit()
-
-    return jsonify({"message": "Assignment deleted successfully"})
-
-
+        return jsonify({"message": "Assignment deleted successfully"})
+    else:
+        abort(403, {"error": "Permission denied. Only admins and teachers can delete assignments."})
 
 
 @app.route('/api/hello')
